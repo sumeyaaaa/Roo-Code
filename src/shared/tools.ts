@@ -80,6 +80,10 @@ export const toolParamNames = [
 	// read_file legacy format parameter (backward compatibility)
 	"files",
 	"line_ranges",
+	// orchestration tool parameters
+	"intent_id",
+	"lesson",
+	"category",
 ] as const
 
 export type ToolParamName = (typeof toolParamNames)[number]
