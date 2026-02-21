@@ -677,9 +677,13 @@ export async function presentAssistantMessage(cline: Task) {
 				}
 			}
 
-			// Initialize hook engine for this task
-			const hookEngine = new HookEngine(cline.cwd)
-			await hookEngine.initialize()
+			// Initialize hook engine for this task (singleton per task to maintain fileHashCache)
+			let hookEngine: HookEngine = (cline as any).__hookEngine
+			if (!hookEngine) {
+				hookEngine = new HookEngine(cline.cwd)
+				await hookEngine.initialize()
+				;(cline as any).__hookEngine = hookEngine
+			}
 
 			// Pre-Hook: Intercept tool execution
 			const preHookResult = await hookEngine.preHook(block.name as ToolName, block, cline)
@@ -732,28 +736,64 @@ export async function presentAssistantMessage(cline: Task) {
 					break
 				case "apply_diff":
 					await checkpointSaveAndMark(cline)
-					await applyDiffToolClass.handle(cline, block as ToolUse<"apply_diff">, {
-						askApproval,
-						handleError,
-						pushToolResult,
-					})
+					let diffSuccess = false
+					let diffResult: string | undefined
+					try {
+						await applyDiffToolClass.handle(cline, block as ToolUse<"apply_diff">, {
+							askApproval,
+							handleError,
+							pushToolResult: (result) => {
+								diffResult = typeof result === "string" ? result : JSON.stringify(result)
+								pushToolResult(result)
+							},
+						})
+						diffSuccess = true
+					} catch (error) {
+						diffSuccess = false
+					}
+					// Post-Hook: Log trace entry
+					await hookEngine.postHook(block.name as ToolName, block, cline, diffSuccess, diffResult)
 					break
 				case "edit":
 				case "search_and_replace":
 					await checkpointSaveAndMark(cline)
-					await editTool.handle(cline, block as ToolUse<"edit">, {
-						askApproval,
-						handleError,
-						pushToolResult,
-					})
+					let editToolSuccess = false
+					let editToolResult: string | undefined
+					try {
+						await editTool.handle(cline, block as ToolUse<"edit">, {
+							askApproval,
+							handleError,
+							pushToolResult: (result) => {
+								editToolResult = typeof result === "string" ? result : JSON.stringify(result)
+								pushToolResult(result)
+							},
+						})
+						editToolSuccess = true
+					} catch (error) {
+						editToolSuccess = false
+					}
+					// Post-Hook: Log trace entry
+					await hookEngine.postHook(block.name as ToolName, block, cline, editToolSuccess, editToolResult)
 					break
 				case "search_replace":
 					await checkpointSaveAndMark(cline)
-					await searchReplaceTool.handle(cline, block as ToolUse<"search_replace">, {
-						askApproval,
-						handleError,
-						pushToolResult,
-					})
+					let searchReplaceSuccess = false
+					let searchReplaceResult: string | undefined
+					try {
+						await searchReplaceTool.handle(cline, block as ToolUse<"search_replace">, {
+							askApproval,
+							handleError,
+							pushToolResult: (result) => {
+								searchReplaceResult = typeof result === "string" ? result : JSON.stringify(result)
+								pushToolResult(result)
+							},
+						})
+						searchReplaceSuccess = true
+					} catch (error) {
+						searchReplaceSuccess = false
+					}
+					// Post-Hook: Log trace entry
+					await hookEngine.postHook(block.name as ToolName, block, cline, searchReplaceSuccess, searchReplaceResult)
 					break
 				case "edit_file":
 					await checkpointSaveAndMark(cline)
@@ -777,11 +817,23 @@ export async function presentAssistantMessage(cline: Task) {
 					break
 				case "apply_patch":
 					await checkpointSaveAndMark(cline)
-					await applyPatchTool.handle(cline, block as ToolUse<"apply_patch">, {
-						askApproval,
-						handleError,
-						pushToolResult,
-					})
+					let patchSuccess = false
+					let patchResult: string | undefined
+					try {
+						await applyPatchTool.handle(cline, block as ToolUse<"apply_patch">, {
+							askApproval,
+							handleError,
+							pushToolResult: (result) => {
+								patchResult = typeof result === "string" ? result : JSON.stringify(result)
+								pushToolResult(result)
+							},
+						})
+						patchSuccess = true
+					} catch (error) {
+						patchSuccess = false
+					}
+					// Post-Hook: Log trace entry
+					await hookEngine.postHook(block.name as ToolName, block, cline, patchSuccess, patchResult)
 					break
 				case "read_file":
 					// Type assertion is safe here because we're in the "read_file" case

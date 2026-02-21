@@ -200,8 +200,21 @@ export class HookEngine {
 			"search_and_replace",
 		]
 
+		// Defensive logging to diagnose why trace entries might be skipped
+		console.log(
+			`[PostHook] tool=${toolName}, success=${success}, activeIntentId=${activeIntentId || "NONE"}, isDestructive=${destructiveTools.includes(toolName)}`,
+		)
+
 		if (destructiveTools.includes(toolName) && activeIntentId && success) {
 			await this.logTraceEntry(toolName, toolUse, task, activeIntentId, result)
+			console.log(`[PostHook] Trace entry logged for ${toolName} under intent ${activeIntentId}`)
+		} else if (destructiveTools.includes(toolName)) {
+			if (!activeIntentId) {
+				console.warn(`[PostHook] Skipping trace for ${toolName}: no activeIntentId set on task`)
+			}
+			if (!success) {
+				console.warn(`[PostHook] Skipping trace for ${toolName}: tool execution failed`)
+			}
 		}
 	}
 
