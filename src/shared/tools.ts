@@ -82,6 +82,10 @@ export const toolParamNames = [
 	"line_ranges",
 	// orchestration tool parameters
 	"intent_id",
+	"intent_name",
+	"owned_scope",
+	"constraints",
+	"acceptance_criteria",
 	"lesson",
 	"category",
 ] as const
@@ -120,7 +124,24 @@ export type NativeToolArgs = {
 	use_mcp_tool: { server_name: string; tool_name: string; arguments?: Record<string, unknown> }
 	write_to_file: { path: string; content: string }
 	select_active_intent: { intent_id: string }
-	record_lesson: { lesson: string; intent_id?: string; category: string }
+	create_intent: {
+		prompt: string
+		intent_id?: string
+		intent_name?: string
+		owned_scope?: string[]
+		constraints?: string[]
+		acceptance_criteria?: string[]
+	}
+	record_lesson: {
+		lesson: string
+		category?: string
+		intent_id?: string
+		context?: {
+			tool?: string
+			error?: string
+			file?: string
+		}
+	}
 	// Add more tools as they are migrated to native protocol
 }
 
@@ -272,6 +293,7 @@ export type ToolGroupConfig = {
 
 export const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
 	select_active_intent: "select active intent",
+	create_intent: "create intent",
 	execute_command: "run commands",
 	read_file: "read files",
 	read_command_output: "read command output",
@@ -323,6 +345,7 @@ export const TOOL_GROUPS: Record<ToolGroup, ToolGroupConfig> = {
 // Tools that are always available to all modes.
 export const ALWAYS_AVAILABLE_TOOLS: ToolName[] = [
 	"select_active_intent",
+	"create_intent",
 	"record_lesson",
 	"ask_followup_question",
 	"attempt_completion",

@@ -255,6 +255,24 @@ This file contains persistent knowledge shared across parallel sessions (Archite
 	}
 
 	/**
+	 * Check if an intent is in .intentignore (protected from changes)
+	 */
+	async isIntentIgnored(intentId: string): Promise<boolean> {
+		const ignorePath = path.join(this.orchestrationDir, ".intentignore")
+		try {
+			const content = await fs.readFile(ignorePath, "utf-8")
+			const lines = content
+				.split("\n")
+				.map((line) => line.trim())
+				.filter((line) => line && !line.startsWith("#"))
+			return lines.includes(intentId)
+		} catch {
+			// File doesn't exist - no intents are ignored
+			return false
+		}
+	}
+
+	/**
 	 * Get orchestration directory path
 	 */
 	getOrchestrationDir(): string {
