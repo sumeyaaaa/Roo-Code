@@ -41,6 +41,7 @@ import { formatResponse } from "../prompts/responses"
 import { sanitizeToolUseId } from "../../utils/tool-id"
 import { HookEngine } from "../../hooks/HookEngine"
 import { selectActiveIntentTool } from "../../hooks/SelectActiveIntentTool"
+import { recordLessonTool } from "../../hooks/RecordLessonTool"
 
 /**
  * Processes and presents assistant message content to the user interface.
@@ -695,6 +696,13 @@ export async function presentAssistantMessage(cline: Task) {
 						pushToolResult,
 					})
 					break
+				case "record_lesson":
+					await recordLessonTool.handle(cline, block as ToolUse<"record_lesson">, {
+						askApproval,
+						handleError,
+						pushToolResult,
+					})
+					break
 				case "write_to_file":
 					await checkpointSaveAndMark(cline)
 					let writeSuccess = false
@@ -782,6 +790,27 @@ export async function presentAssistantMessage(cline: Task) {
 						handleError,
 						pushToolResult,
 					})
+					// Phase 4: Track file read for optimistic locking
+					try {
+						const readParams = block.params as any
+						let filePath: string | undefined
+						if (readParams?.path) {
+							filePath = readParams.path
+						} else if (
+							readParams?.files &&
+							Array.isArray(readParams.files) &&
+							readParams.files.length > 0
+						) {
+							// Legacy format: files array
+							filePath = readParams.files[0]?.path
+						}
+						if (filePath) {
+							await hookEngine.trackFileRead(filePath, cline.cwd)
+						}
+					} catch (error) {
+						// Fail silently - tracking is best-effort
+						console.error("Failed to track file read:", error)
+					}
 					break
 				case "list_files":
 					await listFilesTool.handle(cline, block as ToolUse<"list_files">, {

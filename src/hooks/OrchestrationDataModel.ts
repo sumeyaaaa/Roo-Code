@@ -48,6 +48,8 @@ export interface AgentTraceFile {
 	conversations: AgentTraceConversation[]
 }
 
+export type MutationClass = "AST_REFACTOR" | "INTENT_EVOLUTION"
+
 export interface AgentTraceEntry {
 	id: string
 	timestamp: string
@@ -55,6 +57,7 @@ export interface AgentTraceEntry {
 		revision_id: string
 	}
 	files: AgentTraceFile[]
+	mutation_class?: MutationClass
 }
 
 /**
@@ -201,7 +204,10 @@ This file contains persistent knowledge shared across parallel sessions (Archite
 
 		try {
 			const content = await fs.readFile(tracePath, "utf-8")
-			const lines = content.trim().split("\n").filter((line) => line.trim() && !line.startsWith("#"))
+			const lines = content
+				.trim()
+				.split("\n")
+				.filter((line) => line.trim() && !line.startsWith("#"))
 
 			const entries: AgentTraceEntry[] = []
 
@@ -213,9 +219,7 @@ This file contains persistent knowledge shared across parallel sessions (Archite
 					// Check if any file's conversation references this intent
 					const referencesIntent = entry.files.some((file) =>
 						file.conversations.some((conv) =>
-							conv.related.some(
-								(rel) => rel.type === "intent" && rel.value === intentId,
-							),
+							conv.related.some((rel) => rel.type === "intent" && rel.value === intentId),
 						),
 					)
 
@@ -257,4 +261,3 @@ This file contains persistent knowledge shared across parallel sessions (Archite
 		return this.orchestrationDir
 	}
 }
-

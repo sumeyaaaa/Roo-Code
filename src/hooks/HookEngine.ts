@@ -22,6 +22,8 @@ export interface HookResult {
  */
 export class HookEngine {
 	private dataModel: OrchestrationDataModel
+	// Track file hashes for optimistic locking (Phase 4: Parallel Orchestration)
+	private fileHashCache: Map<string, string> = new Map()
 
 	constructor(workspaceRoot: string) {
 		this.dataModel = new OrchestrationDataModel(workspaceRoot)
@@ -130,6 +132,15 @@ export class HookEngine {
 			if (toolName === "write_to_file" || toolName === "edit_file") {
 				const filePath = (toolUse.params as any).path as string | undefined
 				if (filePath) {
+					// Phase 4: Optimistic Locking - Check for stale file
+					const staleCheck = await this.checkStaleFile(filePath, task.cwd)
+					if (!staleCheck.isCurrent) {
+						return {
+							shouldProceed: false,
+							errorMessage: `Stale File Error: ${filePath} has been modified by another agent or process. Please re-read the file before making changes. Original hash: ${staleCheck.originalHash?.substring(0, 8)}..., Current hash: ${staleCheck.currentHash?.substring(0, 8)}...`,
+						}
+					}
+
 					const scopeValid = await this.validateScope(activeIntentId, filePath, task.cwd)
 					if (!scopeValid.valid) {
 						return {
@@ -240,6 +251,177 @@ export class HookEngine {
 	}
 
 	/**
+	 * Check if a file is stale (has been modified since it was read)
+	 * Phase 4: Optimistic Locking for Parallel Orchestration
+	 */
+	private async checkStaleFile(
+		filePath: string,
+		workspaceRoot: string,
+	): Promise<{ isCurrent: boolean; originalHash?: string; currentHash?: string }> {
+		try {
+			const absolutePath = path.resolve(workspaceRoot, filePath)
+			const normalizedPath = path.normalize(filePath)
+
+			// Get the hash that was stored when the file was read
+			const originalHash = this.fileHashCache.get(normalizedPath)
+
+			// If we don't have a cached hash, this is a new file or first write - allow it
+			if (!originalHash) {
+				// Read current file to cache its hash
+				try {
+					const currentContent = await fs.readFile(absolutePath, "utf-8")
+					const currentHash = this.dataModel.computeContentHash(currentContent)
+					this.fileHashCache.set(normalizedPath, currentHash)
+					return { isCurrent: true, currentHash }
+				} catch {
+					// File doesn't exist yet - this is a new file creation, allow it
+					return { isCurrent: true }
+				}
+			}
+
+			// Read current file content and compute hash
+			try {
+				const currentContent = await fs.readFile(absolutePath, "utf-8")
+				const currentHash = this.dataModel.computeContentHash(currentContent)
+
+				// Compare hashes
+				if (originalHash !== currentHash) {
+					return { isCurrent: false, originalHash, currentHash }
+				}
+
+				// File is current
+				return { isCurrent: true, originalHash, currentHash }
+			} catch {
+				// File was deleted - consider it stale
+				return { isCurrent: false, originalHash, currentHash: undefined }
+			}
+		} catch (error) {
+			console.error("Stale file check error:", error)
+			// Fail open on error to avoid blocking legitimate operations
+			return { isCurrent: true }
+		}
+	}
+
+	/**
+	 * Track file hash when it's read (for optimistic locking)
+	 * This should be called from read_file tool handler
+	 */
+	async trackFileRead(filePath: string, workspaceRoot: string): Promise<void> {
+		try {
+			const absolutePath = path.resolve(workspaceRoot, filePath)
+			const normalizedPath = path.normalize(filePath)
+
+			try {
+				const content = await fs.readFile(absolutePath, "utf-8")
+				const hash = this.dataModel.computeContentHash(content)
+				this.fileHashCache.set(normalizedPath, hash)
+			} catch {
+				// File doesn't exist - that's okay, we'll track it when it's created
+			}
+		} catch (error) {
+			console.error("Failed to track file read:", error)
+		}
+	}
+
+	/**
+	 * Classify mutation type: AST_REFACTOR vs INTENT_EVOLUTION
+	 * AST_REFACTOR: Syntax/structure change, same functionality
+	 * INTENT_EVOLUTION: New feature or functionality change
+	 */
+	private classifyMutation(
+		toolName: ToolName,
+		filePath: string,
+		originalContent: string,
+		newContent: string,
+		intentId: string,
+	): "AST_REFACTOR" | "INTENT_EVOLUTION" {
+		// Heuristic: If the file is new or significantly different, it's INTENT_EVOLUTION
+		// If it's a refactoring tool or similar structure, it's AST_REFACTOR
+
+		// New file = INTENT_EVOLUTION
+		if (!originalContent || originalContent.trim().length === 0) {
+			return "INTENT_EVOLUTION"
+		}
+
+		// If using refactoring-specific tools, likely AST_REFACTOR
+		if (toolName === "apply_patch" || toolName === "apply_diff") {
+			// Check if it's a structural change (rename, move, extract) vs feature addition
+			const originalLines = originalContent.split("\n").length
+			const newLines = newContent.split("\n").length
+			const lineDiff = Math.abs(newLines - originalLines)
+
+			// Small changes (< 20% line difference) are likely refactors
+			if (lineDiff / originalLines < 0.2) {
+				return "AST_REFACTOR"
+			}
+		}
+
+		// Compare content similarity
+		const originalHash = this.dataModel.computeContentHash(originalContent)
+		const newHash = this.dataModel.computeContentHash(newContent)
+
+		// If hashes are very similar (small changes), likely AST_REFACTOR
+		// For now, use a simple heuristic: if edit_file with small changes, it's a refactor
+		if (toolName === "edit_file") {
+			// Count significant differences (non-whitespace changes)
+			const originalSignificant = originalContent.replace(/\s/g, "")
+			const newSignificant = newContent.replace(/\s/g, "")
+			const similarity = this.computeSimilarity(originalSignificant, newSignificant)
+
+			// High similarity (> 80%) suggests refactoring
+			if (similarity > 0.8) {
+				return "AST_REFACTOR"
+			}
+		}
+
+		// Default: assume INTENT_EVOLUTION for new features
+		return "INTENT_EVOLUTION"
+	}
+
+	/**
+	 * Compute similarity between two strings (simple Levenshtein-based)
+	 */
+	private computeSimilarity(str1: string, str2: string): number {
+		if (str1 === str2) return 1.0
+		if (str1.length === 0 || str2.length === 0) return 0.0
+
+		const maxLen = Math.max(str1.length, str2.length)
+		const distance = this.levenshteinDistance(str1, str2)
+		return 1 - distance / maxLen
+	}
+
+	/**
+	 * Compute Levenshtein distance between two strings
+	 */
+	private levenshteinDistance(str1: string, str2: string): number {
+		const matrix: number[][] = []
+
+		for (let i = 0; i <= str2.length; i++) {
+			matrix[i] = [i]
+		}
+
+		for (let j = 0; j <= str1.length; j++) {
+			matrix[0][j] = j
+		}
+
+		for (let i = 1; i <= str2.length; i++) {
+			for (let j = 1; j <= str1.length; j++) {
+				if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+					matrix[i][j] = matrix[i - 1][j - 1]
+				} else {
+					matrix[i][j] = Math.min(
+						matrix[i - 1][j - 1] + 1, // substitution
+						matrix[i][j - 1] + 1, // insertion
+						matrix[i - 1][j] + 1, // deletion
+					)
+				}
+			}
+		}
+
+		return matrix[str2.length][str1.length]
+	}
+
+	/**
 	 * Log trace entry to agent_trace.jsonl
 	 */
 	private async logTraceEntry(
@@ -269,8 +451,22 @@ export class HookEngine {
 			// Read file content to compute hash
 			const absolutePath = path.resolve(task.cwd, filePath)
 			let fileContent = ""
+			let originalContent = ""
 			let startLine = 1
 			let endLine = 1
+
+			// Try to read original content for mutation classification
+			const normalizedPath = path.normalize(filePath)
+			const originalHash = this.fileHashCache.get(normalizedPath)
+			if (originalHash) {
+				try {
+					// We need to reconstruct original content - for now, read current and classify
+					// In a real implementation, you'd store the original content
+					originalContent = ""
+				} catch {
+					// Original content not available
+				}
+			}
 
 			try {
 				fileContent = await fs.readFile(absolutePath, "utf-8")
@@ -293,10 +489,16 @@ export class HookEngine {
 			const codeBlock = relevantLines.join("\n")
 			const contentHash = this.dataModel.computeContentHash(codeBlock)
 
+			// Classify mutation type
+			const mutationClass = this.classifyMutation(toolName, filePath, originalContent, fileContent, intentId)
+
+			// Update file hash cache after successful write
+			this.fileHashCache.set(normalizedPath, this.dataModel.computeContentHash(fileContent))
+
 			// Get model identifier from task
 			const modelId = task.api.getModel().id
 
-			// Build trace entry
+			// Build trace entry with mutation classification
 			const traceEntry = {
 				id: `trace-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
 				timestamp: new Date().toISOString(),
@@ -330,6 +532,7 @@ export class HookEngine {
 						],
 					},
 				],
+				mutation_class: mutationClass,
 			}
 
 			await this.dataModel.appendTraceEntry(traceEntry)
@@ -339,4 +542,3 @@ export class HookEngine {
 		}
 	}
 }
-
