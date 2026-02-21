@@ -949,6 +949,11 @@ export async function presentAssistantMessage(cline: Task) {
 						block as ToolUse<"attempt_completion">,
 						completionCallbacks,
 					)
+					// Lifecycle: Update intent status when task completes
+					const activeIntentId = (cline as any).activeIntentId as string | undefined
+					if (activeIntentId && hookEngine) {
+						await hookEngine.updateIntentLifecycleOnCompletion(activeIntentId, cline)
+					}
 					break
 				}
 				case "run_slash_command":

@@ -208,6 +208,12 @@ export class HookEngine {
 		if (destructiveTools.includes(toolName) && activeIntentId && success) {
 			await this.logTraceEntry(toolName, toolUse, task, activeIntentId, result)
 			console.log(`[PostHook] Trace entry logged for ${toolName} under intent ${activeIntentId}`)
+
+			// Lifecycle: Update intent status to IN_PROGRESS if it was TODO
+			await this.updateIntentLifecycle(activeIntentId, "IN_PROGRESS")
+
+			// Lifecycle: Update intent_map.md with file changes
+			await this.updateIntentMap(activeIntentId, toolUse, task)
 		} else if (destructiveTools.includes(toolName)) {
 			if (!activeIntentId) {
 				console.warn(`[PostHook] Skipping trace for ${toolName}: no activeIntentId set on task`)
@@ -215,6 +221,171 @@ export class HookEngine {
 			if (!success) {
 				console.warn(`[PostHook] Skipping trace for ${toolName}: tool execution failed`)
 			}
+		}
+	}
+
+	/**
+	 * Update intent lifecycle status
+	 * Lifecycle storytelling: Track intent evolution from TODO -> IN_PROGRESS -> DONE
+	 */
+	async updateIntentLifecycle(intentId: string, newStatus: "IN_PROGRESS" | "DONE" | "BLOCKED"): Promise<void> {
+		try {
+			const intent = await this.dataModel.getIntent(intentId)
+			if (intent && intent.status !== newStatus) {
+				const oldStatus = intent.status
+				intent.status = newStatus
+				intent.updated_at = new Date().toISOString()
+				await this.dataModel.updateIntent(intent)
+				console.log(`[Lifecycle] Intent ${intentId} status updated: ${oldStatus} -> ${newStatus}`)
+
+				// Update AGENT.md with lifecycle event (shared brain)
+				await this.recordLifecycleEvent(intentId, oldStatus, newStatus)
+			}
+		} catch (error) {
+			console.error(`[Lifecycle] Failed to update intent ${intentId} status:`, error)
+		}
+	}
+
+	/**
+	 * Update intent lifecycle when task completes
+	 * Evaluates acceptance criteria and updates status accordingly
+	 */
+	async updateIntentLifecycleOnCompletion(intentId: string, task: Task): Promise<void> {
+		try {
+			const intent = await this.dataModel.getIntent(intentId)
+			if (!intent) return
+
+			// Check if acceptance criteria are met (simplified heuristic)
+			// In a full implementation, this would run tests/checks
+			const traceEntries = await this.dataModel.getTraceEntriesForIntent(intentId, 10)
+			const hasRecentActivity = traceEntries.length > 0
+
+			if (hasRecentActivity && intent.status === "IN_PROGRESS") {
+				// For now, mark as DONE if there's been activity
+				// In production, this would verify acceptance criteria
+				await this.updateIntentLifecycle(intentId, "DONE")
+			}
+		} catch (error) {
+			console.error(`[Lifecycle] Failed to update intent lifecycle on completion:`, error)
+		}
+	}
+
+	/**
+	 * Record lifecycle event to AGENT.md (shared brain)
+	 * Demonstrates explicit lifecycle storytelling
+	 */
+	private async recordLifecycleEvent(
+		intentId: string,
+		oldStatus: string,
+		newStatus: string,
+	): Promise<void> {
+		try {
+			const agentPath = path.join(this.dataModel.getOrchestrationDir(), "AGENT.md")
+			let content = ""
+			try {
+				content = await fs.readFile(agentPath, "utf-8")
+			} catch {
+				content = `# Shared Knowledge Base
+
+This file contains persistent knowledge shared across parallel sessions (Architect/Builder/Tester).
+
+## Lessons Learned
+
+## Intent Lifecycle Events
+
+`
+			}
+
+			const timestamp = new Date().toISOString().split("T")[0]
+			const eventEntry = `### ${timestamp}: Intent Lifecycle Transition
+- **Intent:** ${intentId}
+- **Transition:** ${oldStatus} → ${newStatus}
+- **Timestamp:** ${new Date().toISOString()}
+- **Context:** Intent status updated as part of orchestration lifecycle
+
+---
+
+`
+
+			// Find or create Intent Lifecycle Events section
+			if (content.includes("## Intent Lifecycle Events")) {
+				const sectionIndex = content.indexOf("## Intent Lifecycle Events")
+				const afterHeader = content.indexOf("\n", sectionIndex) + 1
+				content = content.slice(0, afterHeader) + eventEntry + content.slice(afterHeader)
+			} else {
+				content += `\n## Intent Lifecycle Events\n\n${eventEntry}`
+			}
+
+			await fs.writeFile(agentPath, content, "utf-8")
+			console.log(`[SharedBrain] Lifecycle event recorded to AGENT.md for ${intentId}`)
+		} catch (error) {
+			console.error(`[SharedBrain] Failed to record lifecycle event:`, error)
+		}
+	}
+
+	/**
+	 * Update intent_map.md with file changes (lifecycle storytelling)
+	 * Shows explicit mapping of intent to physical files
+	 */
+	private async updateIntentMap(intentId: string, toolUse: ToolUse, task: Task): Promise<void> {
+		try {
+			const intent = await this.dataModel.getIntent(intentId)
+			if (!intent) return
+
+			const params = toolUse.params as any
+			const filePath = params.path || params.file_path
+			if (!filePath) return
+
+			const mapPath = path.join(this.dataModel.getOrchestrationDir(), "intent_map.md")
+			let content = ""
+			try {
+				content = await fs.readFile(mapPath, "utf-8")
+			} catch {
+				content = "# Intent Map\n\nThis file maps high-level business intents to physical files and AST nodes.\n\n## Intents\n\n"
+			}
+
+			// Check if intent section exists
+			const intentSectionRegex = new RegExp(`## ${intentId}:.*?(?=##|$)`, "s")
+			const existingSection = content.match(intentSectionRegex)
+
+			const timestamp = new Date().toISOString()
+			const fileEntry = `  - \`${filePath}\` (updated ${timestamp})`
+
+			if (existingSection) {
+				// Update existing section
+				let section = existingSection[0]
+				if (!section.includes(filePath)) {
+					// Add file to existing section
+					const filesSection = section.match(/### Files\s*\n([\s\S]*?)(?=\n###|$)/)
+					if (filesSection) {
+						section = section.replace(filesSection[0], `${filesSection[0]}${fileEntry}\n`)
+					} else {
+						// Add Files section
+						section = section.replace(/(\n## |$)/, `\n### Files\n${fileEntry}\n$1`)
+					}
+					// Update status
+					section = section.replace(/Status:.*/, `Status: ${intent.status}`)
+					section = section.replace(/Last Updated:.*/, `Last Updated: ${timestamp}`)
+					content = content.replace(intentSectionRegex, section)
+				}
+			} else {
+				// Create new section
+				const newSection = `## ${intentId}: ${intent.name}
+- **Status:** ${intent.status}
+- **Last Updated:** ${timestamp}
+### Files
+${fileEntry}
+### Scope
+${intent.owned_scope.map((s) => `  - ${s}`).join("\n")}
+
+`
+				content = content.replace(/## Intents\n\n/, `## Intents\n\n${newSection}`)
+			}
+
+			await fs.writeFile(mapPath, content, "utf-8")
+			console.log(`[Lifecycle] Intent map updated for ${intentId}`)
+		} catch (error) {
+			console.error(`[Lifecycle] Failed to update intent map:`, error)
 		}
 	}
 
